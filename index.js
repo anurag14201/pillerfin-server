@@ -6,29 +6,24 @@ const { MongoClient, ServerApiVersion, ObjectId } = require('mongodb');
 const port = process.env.PORT || 3000;
 
 const stripe = require('stripe')(process.env.PAYMENT_SECRET);
-
 const crypto = require('crypto');
-
 const admin = require('firebase-admin');
 
-
 const decoded = Buffer.from(process.env.FB_SERVICE_KEY, 'base64').toString(
-	'utf8'
+    'utf8'
 );
 const serviceAccount = JSON.parse(decoded);
 
 admin.initializeApp({
-	credential: admin.credential.cert(serviceAccount),
+    credential: admin.credential.cert(serviceAccount),
 });
 
-// loan id generator
-
-function generateLoanId() {
-	const prefix = 'LOAN'; // your brand prefix
-	const date = new Date().toISOString().slice(0, 10).replace(/-/g, ''); // YYYYMMDD
-	const random = crypto.randomBytes(3).toString('hex').toUpperCase(); // 6-char random hex
-
-	return `${prefix}-${date}-${random}`;
+// Order ID generator
+function generateOrderId() {
+    const prefix = 'AURA'; 
+    const date = new Date().toISOString().slice(0, 10).replace(/-/g, '');
+    const random = crypto.randomBytes(3).toString('hex').toUpperCase();
+    return `${prefix}-${date}-${random}`;
 }
 
 // middleware
@@ -36,387 +31,317 @@ app.use(cors());
 app.use(express.json());
 
 const verifyFBToken = async (req, res, next) => {
-	const token = req.headers.authorization;
-	if (!token) {
-		return res.status(401).send({ message: 'unauthorize access' });
-	}
-	try {
-		const idToken = token.split(' ')[1];
-		const decoded = await admin.auth().verifyIdToken(idToken);
-		req.decoded_email = decoded.email;
-		next();
-	} catch (err) {
-		return res.status(401).send({ message: 'unauthorize access' });
-	}
+    const token = req.headers.authorization;
+    if (!token) {
+        return res.status(401).send({ message: 'unauthorized access' });
+    }
+    try {
+        const idToken = token.split(' ')[1];
+        const decoded = await admin.auth().verifyIdToken(idToken);
+        req.decoded_email = decoded.email;
+        next();
+    } catch (err) {
+        return res.status(401).send({ message: 'unauthorized access' });
+    }
 };
 
-const uri = `mongodb+srv://${process.env.DB_USER}:${process.env.DB_PASSWORD}@cluster0.fielwth.mongodb.net/?appName=Cluster0'`;
+const uri = `mongodb+srv://${process.env.DB_USER}:${process.env.DB_PASSWORD}@cluster0.qennq9r.mongodb.net/?appName=Cluster0`;
 
-// Create a MongoClient with a MongoClientOptions object to set the Stable API version
 const client = new MongoClient(uri, {
-	serverApi: {
-		version: ServerApiVersion.v1,
-		strict: true,
-		deprecationErrors: true,
-	},
+    serverApi: {
+        version: ServerApiVersion.v1,
+        strict: true,
+        deprecationErrors: true,
+    },
 });
 
 async function run() {
-	try {
-		// Connect the client to the server	(optional starting in v4.7)
-		// await client.connect();
+    try {
+        const db = client.db('Loan_link_db');
+        const productCollection = db.collection('loans'); 
+        const orderCollection = db.collection('orders'); 
+        const userCollection = db.collection('users');
+        const paymentCollection = db.collection('payments');
 
-		const db = client.db('Loan_link_db');
-		const loanCollection = db.collection('loans');
-		const loanApplicationCollection = db.collection('loanApplication');
-		const userCollection = db.collection('users');
-		const paymentCollection = db.collection('payments');
+        const verifyAdmin = async (req, res, next) => {
+            const email = req.decoded_email;
+            const query = { email };
+            const user = await userCollection.findOne(query);
+            if (!user || user.role !== 'Admin') {
+                return res.status(403).send({ message: 'Forbidden Access' });
+            }
+            next();
+        };
 
-		const verifyAdmin = async (req, res, next) => {
-			const email = req.decoded_email;
-			const query = { email };
-			const user = await userCollection.findOne(query);
-			if (!user || user.role !== 'Admin') {
-				return res.status(403).send({ message: 'Forbidden Access' });
-			}
-			next();
-		};
-		const verifyManager = async (req, res, next) => {
-			const email = req.decoded_email;
-			const query = { email };
-			const user = await userCollection.findOne(query);
-			if (!user || user.role !== 'Manager') {
-				return res.status(403).send({ message: 'Forbidden Access' });
-			}
-			next();
-		};
-		const verifyAdminManager = async (req, res, next) => {
-			const email = req.decoded_email;
-			const query = { email };
-			const user = await userCollection.findOne(query);
-			if (!user || (user.role !== 'Admin' && user.role !== 'Manager')) {
-				return res.status(403).send({ message: 'Forbidden Access' });
-			}
-			next();
-		};
+        const verifyManager = async (req, res, next) => {
+            const email = req.decoded_email;
+            const query = { email };
+            const user = await userCollection.findOne(query);
+            if (!user || user.role !== 'Manager') {
+                return res.status(403).send({ message: 'Forbidden Access' });
+            }
+            next();
+        };
 
-		// loan collection API
-		app.get('/all-loans', async (req, res) => {
-			const cursor = loanCollection.find({ showOnHome: true });
-			const result = await cursor.toArray();
-			res.send(result);
-		});
-		app.get(
-			'/all-loans-admin',
-			verifyFBToken,
-			verifyAdminManager,
-			async (req, res) => {
-				const email = req.query.email;
-				const searchText = req.query.searchText;
-				const query = {};
-				if (email) {
-					query.createdBy = email;
-				}
-				if (searchText && searchText.trim() !== '') {
-					query.$or = [
-						{ category: { $regex: searchText, $options: 'i' } },
-						{ title: { $regex: searchText, $options: 'i' } },
-					];
-				}
-				const cursor = loanCollection.find(query).sort({ createdAt: -1 });
-				const result = await cursor.toArray();
-				res.send(result);
-			}
-		);
-		app.post('/all-loans', verifyFBToken, verifyManager, async (req, res) => {
-			const newLoan = req.body;
-			const email = req.query.email;
-			newLoan.createdAt = new Date();
-			newLoan.createdBy = email;
-			const result = await loanCollection.insertOne(newLoan);
-			res.send(result);
-		});
+        const verifyAdminManager = async (req, res, next) => {
+            const email = req.decoded_email;
+            const query = { email };
+            const user = await userCollection.findOne(query);
+            if (!user || (user.role !== 'Admin' && user.role !== 'Manager')) {
+                return res.status(403).send({ message: 'Forbidden Access' });
+            }
+            next();
+        };
 
-		app.delete(
-			'/all-loans/:id',
-			verifyFBToken,
-			verifyAdminManager,
-			async (req, res) => {
-				const id = req.params.id;
-				const query = { _id: new ObjectId(id) };
-				const result = await loanCollection.deleteOne(query);
-				res.send(result);
-			}
-		);
+        // --- PRODUCT API'S ---
+        app.get('/all-loans', async (req, res) => {
+            const cursor = productCollection.find({});
+            const result = await cursor.toArray();
+            res.send(result);
+        });
 
-		// 6 loan collection api
-		app.get('/six-loans', async (req, res) => {
-			const cursor = loanCollection
-				.find({ showOnHome: true })
-				.limit(6)
-				.sort({ createdAt: -1 });
-			const result = await cursor.toArray();
-			res.send(result);
-		});
-		// specific loan api
-		app.get('/all-loans/:id', async (req, res) => {
-			const id = req.params.id;
-			const query = { _id: new ObjectId(id) };
-			const result = await loanCollection.findOne(query);
-			res.send(result);
-		});
-		app.patch(
-			'/all-loans/:id',
-			verifyFBToken,
-			verifyAdminManager,
-			async (req, res) => {
-				const id = req.params.id;
-				const query = { _id: new ObjectId(id) };
-				const updatesLoans = req.body;
-				const update = {
-					$set: updatesLoans,
-				};
-				const result = await loanCollection.updateOne(query, update);
-				res.send(result);
-			}
-		);
-		app.patch('/all-loans/:id', verifyFBToken, async (req, res) => {
-			const id = req.params.id;
-			const query = { _id: new ObjectId(id) };
-			const showOnHome = req.body;
-			const update = {
-				$set: showOnHome,
-			};
-			const result = await loanCollection.updateOne(query, update);
-			res.send(result);
-		});
+        app.get('/six-loans', async (req, res) => {
+            const cursor = productCollection
+                .find({})
+                .limit(6)
+                .sort({ createdAt: -1 });
+            const result = await cursor.toArray();
+            res.send(result);
+        });
 
-		// loan application
-		app.get('/loan-application', verifyFBToken, async (req, res) => {
-			const query = {};
-			const email = req.query.email;
-			if (email) {
-				query.email = email;
+        app.get('/all-loans/:id', async (req, res) => {
+            const id = req.params.id;
+            const query = { _id: new ObjectId(id) };
+            const result = await productCollection.findOne(query);
+            res.send(result);
+        });
 
-				if (email !== req.decoded_email) {
-					return res.status(403).send({ message: 'forbidden access' });
-				}
-			}
+        // Admin & Manager endpoint to view all products with optional filters
+        app.get('/all-loans-admin', verifyFBToken, verifyAdminManager, async (req, res) => {
+            const { email, searchText } = req.query;
+            let query = {};
+            
+            if (email) {
+                query.createdBy = email;
+            }
+            
+            if (searchText && searchText.trim() !== '') {
+                query.$or = [
+                    { title: { $regex: searchText,$options: 'i' } },
+                    { category: { $regex: searchText,$options: 'i' } }
+                ];
+            }
 
-			const result = await loanApplicationCollection
-				.find(query)
-				.sort({ createdAt: -1 })
-				.toArray();
+            const result = await productCollection.find(query).toArray();
+            res.send(result);
+        });
 
-			res.send(result);
-		});
-		app.get('/loan-applications', verifyFBToken, async (req, res) => {
-			const loanStatus = req.query.loanStatus;
-			const query = {};
-			if (loanStatus === 'Pending') {
-				query.loanStatus = loanStatus;
-			}
-			if (loanStatus === 'Approved') {
-				query.loanStatus = loanStatus;
-			}
-			if (loanStatus === 'Rejected') {
-				query.loanStatus = loanStatus;
-			}
+        app.post('/all-loans', verifyFBToken, verifyManager, async (req, res) => {
+            const newProduct = req.body;
+            const email = req.query.email;
+            newProduct.createdAt = new Date();
+            newProduct.createdBy = email;
+            const result = await productCollection.insertOne(newProduct);
+            res.send(result);
+        });
 
-			const result = await loanApplicationCollection
-				.find(query)
-				.sort({ createdAt: -1 })
-				.toArray();
+        app.delete('/all-loans/:id', verifyFBToken, verifyAdminManager, async (req, res) => {
+            const id = req.params.id;
+            const query = { _id: new ObjectId(id) };
+            const result = await productCollection.deleteOne(query);
+            res.send(result);
+        });
 
-			res.send(result);
-		});
+        app.patch('/all-loans/:id', verifyFBToken, verifyAdminManager, async (req, res) => {
+            const id = req.params.id;
+            const query = { _id: new ObjectId(id) };
+            const updatedFields = req.body;
+            const update = {
+                $set: updatedFields
+            };
+            const result = await productCollection.updateOne(query, update);
+            res.send(result);
+        });
 
-		app.post('/loan-application', verifyFBToken, async (req, res) => {
-			const loanApplication = req.body;
-			const loanId = generateLoanId();
-			loanApplication.createdAt = new Date();
-			loanApplication.loanId = loanId;
-			loanApplication.paymentStatus = 'pending';
-			loanApplication.loanFee = 10;
+        // --- ORDER & ADMIN ORDERS API'S ---
+        app.get('/orders', verifyFBToken, async (req, res) => {
+            const query = {};
+            const email = req.query.email;
+            if (email) {
+                query.email = email;
+                if (email !== req.decoded_email) {
+                    return res.status(403).send({ message: 'forbidden access' });
+                }
+            }
+            const result = await orderCollection
+                .find(query)
+                .sort({ createdAt: -1 })
+                .toArray();
+            res.send(result);
+        });
 
-			const result = await loanApplicationCollection.insertOne(loanApplication);
-			res.send(result);
-		});
+        // Admin endpoint to view all customer orders
+        app.get('/all-orders', verifyFBToken, verifyAdminManager, async (req, res) => {
+            const result = await orderCollection.find().sort({ createdAt: -1 }).toArray();
+            res.send(result);
+        });
 
-		app.patch('/loan-applications/:id', verifyFBToken, async (req, res) => {
-			const id = req.params.id;
-			const query = { _id: new ObjectId(id) };
-			const updatedStatus = req.body;
-			const update = {
-				$set: {
-					loanStatus: updatedStatus.loanStatus,
-				},
-			};
-			const result = await loanApplicationCollection.updateOne(query, update);
-			res.send(result);
-		});
+        app.post('/loan-application', verifyFBToken, async (req, res) => {
+            const orderData = req.body;
+            const orderTrackingId = generateOrderId();
+            orderData.createdAt = new Date();
+            orderData.orderTrackingId = orderTrackingId;
+            orderData.paymentStatus = 'pending';
 
-		app.delete(
-			'/loan-application/:id/delete',
-			verifyFBToken,
-			async (req, res) => {
-				const id = req.params.id;
-				const query = { _id: new ObjectId(id) };
-				const result = await loanApplicationCollection.deleteOne(query);
-				res.send(result);
-			}
-		);
+            const result = await orderCollection.insertOne(orderData);
+            res.send(result);
+        });
 
-		// payment API's
+        app.post('/orders', verifyFBToken, async (req, res) => {
+            const orderData = req.body;
+            const orderTrackingId = generateOrderId();
+            orderData.createdAt = new Date();
+            orderData.orderTrackingId = orderTrackingId;
+            orderData.paymentStatus = 'pending';
 
-		app.post('/create-checkout-session', async (req, res) => {
-			const paymentInfo = req.body;
-			const amount = parseInt(paymentInfo.loanFee) * 100;
-			const session = await stripe.checkout.sessions.create({
-				line_items: [
-					{
-						price_data: {
-							currency: 'usd',
-							unit_amount: amount,
-							product_data: {
-								name: `Payment for: ${paymentInfo.loanTitle}`,
-							},
-						},
-						quantity: 1,
-					},
-				],
-				mode: 'payment',
-				metadata: {
-					loanId: paymentInfo.loanId,
-					loan_tracking_id: paymentInfo.loan_Id,
-				},
-				customer_email: paymentInfo.email,
-				success_url: `${process.env.SITE_DOMAIN}/dashboard/payment-success?session_id={CHECKOUT_SESSION_ID}`,
-				cancel_url: `${process.env.SITE_DOMAIN}/dashboard/payment-cancel?`,
-			});
-			res.send({ url: session.url });
-		});
+            const result = await orderCollection.insertOne(orderData);
+            res.send(result);
+        });
 
-		app.patch('/verified-payment-success', async (req, res) => {
-			const sessionId = req.query.session_id;
-			const session = await stripe.checkout.sessions.retrieve(sessionId);
-			const transactionId = session.payment_intent;
-			const query = { transactionId: transactionId };
-			const paymentExist = await paymentCollection.findOne(query);
-			if (paymentExist) {
-				return res.send({ message: 'already exist', transactionId });
-			}
-			if (session.payment_status === 'paid') {
-				const id = session.metadata.loanId;
-				const query = { _id: new ObjectId(id) };
-				const update = {
-					$set: {
-						paymentStatus: 'paid',
-						transactionId: session.payment_intent,
-						paidAt: new Date(),
-					},
-				};
-				const result = await loanApplicationCollection.updateOne(query, update);
-				const payment = {
-					amount: session.amount_total / 100,
-					transactionId: session.payment_intent,
-					paymentStatus: session.payment_status,
-					customerEmail: session.customer_email,
-					loanTrackingId: session.metadata.loan_tracking_id,
-					paidAt: new Date(),
-				};
-				if (session.payment_status === 'paid') {
-					const paymentResult = await paymentCollection.insertOne(payment);
-					return res.send({
-						success: true,
-						paymentInfo: paymentResult,
-						loanID: session.metadata.loan_tracking_id,
-						transactionId: session.payment_intent,
-					});
-				}
-				return res.send(result);
-			}
-			res.send({ success: false });
-		});
+        app.patch('/orders/:id', verifyFBToken, async (req, res) => {
+            const id = req.params.id;
+            const query = { _id: new ObjectId(id) };
+            const updatedStatus = req.body;
+            const update = {
+                $set: {
+                    orderStatus: updatedStatus.orderStatus,
+                },
+            };
+            const result = await orderCollection.updateOne(query, update);
+            res.send(result);
+        });
 
-		// user collection api
-		app.post('/users', async (req, res) => {
-			const newUser = req.body;
-			newUser.role = 'Borrower';
-			newUser.createdAt = new Date();
-			const email = newUser.email;
+        // --- STRIPE PAYMENT API'S ---
+        app.post('/create-checkout-session', async (req, res) => {
+            const paymentInfo = req.body;
+            const amount = parseInt(paymentInfo.totalAmount) * 100;
+            const session = await stripe.checkout.sessions.create({
+                line_items: [
+                    {
+                        price_data: {
+                            currency: 'usd',
+                            unit_amount: amount,
+                            product_data: {
+                                name: `Purchase: ${paymentInfo.productTitle}`,
+                            },
+                        },
+                        quantity: 1,
+                    },
+                ],
+                mode: 'payment',
+                metadata: {
+                    orderId: paymentInfo.orderId,
+                    order_tracking_id: paymentInfo.orderTrackingId,
+                },
+                customer_email: paymentInfo.email,
+                success_url: `${process.env.SITE_DOMAIN}/dashboard/payment-success?session_id={CHECKOUT_SESSION_ID}`,
+                cancel_url: `${process.env.SITE_DOMAIN}/dashboard/payment-cancel?`,
+            });
+            res.send({ url: session.url });
+        });
 
-			const userExist = await userCollection.findOne({ email });
-			if (userExist) {
-				return res.send('user already exist');
-			}
-			const result = await userCollection.insertOne(newUser);
-			res.send(result);
-		});
-		app.get('/users', verifyFBToken, async (req, res) => {
-			const email = req.query.email;
-			const role = req.query.role;
-			const searchText = req.query.searchText;
-			const query = {};
-			if (email) {
-				query.email = email;
-			}
-			if (role) {
-				query.role = role;
-			}
-			if (searchText && searchText.trim() !== '') {
-				query.$or = [
-					{ displayName: { $regex: searchText, $options: 'i' } },
-					{ email: { $regex: searchText, $options: 'i' } },
-					{ role: { $regex: searchText, $options: 'i' } },
-				];
-			}
+        app.patch('/verified-payment-success', async (req, res) => {
+            const sessionId = req.query.session_id;
+            const session = await stripe.checkout.sessions.retrieve(sessionId);
+            const transactionId = session.payment_intent;
+            const query = { transactionId: transactionId };
+            const paymentExist = await paymentCollection.findOne(query);
+            if (paymentExist) {
+                return res.send({ message: 'already exist', transactionId });
+            }
+            if (session.payment_status === 'paid') {
+                const id = session.metadata.orderId;
+                const query = { _id: new ObjectId(id) };
+                const update = {
+                    $set: {
+                        paymentStatus: 'paid',
+                        transactionId: session.payment_intent,
+                        paidAt: new Date(),
+                    },
+                };
+                const result = await orderCollection.updateOne(query, update);
+                const payment = {
+                    amount: session.amount_total / 100,
+                    transactionId: session.payment_intent,
+                    paymentStatus: session.payment_status,
+                    customerEmail: session.customer_email,
+                    orderTrackingId: session.metadata.order_tracking_id,
+                    paidAt: new Date(),
+                };
+                const paymentResult = await paymentCollection.insertOne(payment);
+                return res.send({
+                    success: true,
+                    paymentInfo: paymentResult,
+                    orderID: session.metadata.order_tracking_id,
+                    transactionId: session.payment_intent,
+                });
+            }
+            res.send({ success: false });
+        });
 
-			const result = await userCollection.find(query).toArray();
-			res.send(result);
-		});
-		app.get('/users/:id', async (req, res) => {
-			const id = req.params.id;
-			const query = { _id: new ObjectId(id) };
-			const result = await userCollection.find(query).toArray();
-			res.send(result);
-		});
-		app.get('/users/:email/role', async (req, res) => {
-			const email = req.params.email;
-			const query = { email };
-			const user = await userCollection.findOne(query);
-			res.send({ role: user?.role || 'Borrower' });
-		});
-		app.patch('/users/:id', async (req, res) => {
-			const role = req.body.role;
-			const id = req.params.id;
-			const query = { _id: new ObjectId(id) };
-			const updatedRole = {
-				$set: {
-					role: role,
-				},
-			};
+        // --- USER API'S ---
+        app.post('/users', async (req, res) => {
+            const newUser = req.body;
+            newUser.role = 'Customer';
+            newUser.createdAt = new Date();
+            const email = newUser.email;
 
-			const result = await userCollection.updateOne(query, updatedRole);
-			res.send(result);
-		});
+            const userExist = await userCollection.findOne({ email });
+            if (userExist) {
+                return res.send('user already exist');
+            }
+            const result = await userCollection.insertOne(newUser);
+            res.send(result);
+        });
 
-		// Send a ping to confirm a successful connection
-		// await client.db('admin').command({ ping: 1 });
-		// console.log(
-		// 	'Pinged your deployment. You successfully connected to MongoDB!'
-		// );
-	} finally {
-		// Ensures that the client will close when you finish/error
-		// await client.close();
-	}
+        app.get('/users', verifyFBToken, async (req, res) => {
+            const email = req.query.email;
+            const role = req.query.role;
+            const query = {};
+            if (email) query.email = email;
+            if (role) query.role = role;
+
+            const result = await userCollection.find(query).toArray();
+            res.send(result);
+        });
+
+        app.get('/users/:email/role', async (req, res) => {
+            const email = req.params.email;
+            const query = { email };
+            const user = await userCollection.findOne(query);
+            res.send({ role: user?.role || 'Customer' });
+        });
+
+        app.patch('/users/:id', async (req, res) => {
+            const role = req.body.role;
+            const id = req.params.id;
+            const query = { _id: new ObjectId(id) };
+            const updatedRole = { $set: { role: role } };
+            const result = await userCollection.updateOne(query, updatedRole);
+            res.send(result);
+        });
+
+        await client.db('admin').command({ ping: 1 });
+        console.log('Pinged your deployment. You successfully connected to MongoDB!');
+    } finally {
+    }
 }
 run().catch(console.dir);
 
 app.get('/', (req, res) => {
-	res.send('Loan link is running');
+    res.send('Aura store server is running smoothly');
 });
 
 app.listen(port, () => {
-	console.log(`Example app listening on port ${port}`);
+    console.log(`Server listening on port ${port}`);
 });
