@@ -5,7 +5,7 @@ require('dotenv').config();
 const { MongoClient, ServerApiVersion, ObjectId } = require('mongodb');
 const port = process.env.PORT || 3000;
 
-const stripe = require('stripe')(process.env.PAYMENT_SECRET);
+const stripe = require('stripe')(process.env.PAYMENT_SECRET || 'sk_test_placeholder');
 const crypto = require('crypto');
 const admin = require('firebase-admin');
 
