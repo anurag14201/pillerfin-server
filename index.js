@@ -11,13 +11,8 @@ const stripe = require('stripe')(process.env.PAYMENT_SECRET || 'sk_test_placehol
 const crypto = require('crypto');
 const admin = require('firebase-admin');
 
-if (!process.env.FB_SERVICE_KEY) {
-    console.error("ERROR: FB_SERVICE_KEY is missing from environment variables!");
-}
-const decoded = Buffer.from(process.env.FB_SERVICE_KEY, 'base64').toString(
-    'utf8'
-);
-const serviceAccount = JSON.parse(decoded);
+// Load Firebase credentials directly from the local JSON file
+const serviceAccount = require('./loan-link-firebase-adminsdk.json');
 
 admin.initializeApp({
     credential: admin.credential.cert(serviceAccount),
